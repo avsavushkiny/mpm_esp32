@@ -9,6 +9,7 @@ static ProcessDescriptor g_procTable[OS_MAX_PROCESSES];
 static SemaphoreHandle_t g_procMutex  = nullptr;
 static uint16_t          g_nextPid    = 100;
 static SemaphoreHandle_t g_printMutex = nullptr;
+static void osNoticeInit();
 
 // ---------- Безопасный вывод через UART0 ----------
 void osPrintf(const char* fmt, ...)
@@ -36,6 +37,8 @@ bool osKernelInit()
     g_procMutex  = xSemaphoreCreateMutex();
     g_printMutex = xSemaphoreCreateMutex();
     if (!g_procMutex || !g_printMutex) return false;
+
+    osNoticeInit();
 
     for (auto& p : g_procTable) {
         p.pid   = 0;
@@ -297,4 +300,52 @@ void osFlagSetFromISR(ProcessDescriptor* proc, EventBits_t bits)
     BaseType_t hpw = pdFALSE;
     xEventGroupSetBitsFromISR(proc->flags, bits, &hpw);
     portYIELD_FROM_ISR(hpw);
+}
+
+// ---------- Системные уведомления (с эпохами) ----------
+static SemaphoreHandle_t g_noticeMutex = nullptr;
+static volatile uint32_t g_noticeEpoch = 0;    // растёт при каждом уведомлении
+static char              g_noticeText[OS_NOTICE_MAX_LEN] = {0};
+
+static void osNoticeInit()
+{
+    if (!g_noticeMutex) g_noticeMutex = xSemaphoreCreateMutex();
+}
+
+void osNotifyAll(const char* message)
+{
+    if (!message) return;
+    if (!g_noticeMutex) osNoticeInit();
+
+    if (xSemaphoreTake(g_noticeMutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(g_noticeText, message, OS_NOTICE_MAX_LEN - 1);
+        g_noticeText[OS_NOTICE_MAX_LEN - 1] = '\0';
+        g_noticeEpoch++;                  // <-- новая эпоха
+        xSemaphoreGive(g_noticeMutex);
+    }
+}
+
+void osNotifyAllAndWait(const char* message, uint32_t waitMs)
+{
+    osNotifyAll(message);
+    vTaskDelay(pdMS_TO_TICKS(waitMs));
+}
+
+// Возвращает true, если для этой задачи есть новое уведомление.
+// localEpoch — указатель на локальную переменную задачи.
+bool osNotifyPoll(uint32_t* localEpoch, char* out, size_t maxLen)
+{
+    if (!localEpoch || !out) return false;
+
+    uint32_t current = g_noticeEpoch;
+    if (current == *localEpoch) return false;   // ничего нового
+
+    if (g_noticeMutex && xSemaphoreTake(g_noticeMutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(out, g_noticeText, maxLen - 1);
+        out[maxLen - 1] = '\0';
+        *localEpoch = current;
+        xSemaphoreGive(g_noticeMutex);
+        return true;
+    }
+    return false;
 }

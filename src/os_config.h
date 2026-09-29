@@ -77,5 +77,9 @@ enum class ProcState : uint8_t {
 #define OS_UID_GUEST        1
 #define OS_UID_NOBODY       255     // никому не принадлежит
 
+// ---------- Системные уведомления ----------
+#define OS_NOTICE_MAX_LEN    192
+#define OS_NOTICE_FLAG_SET   0x01
+
 // Единая точка безопасного вывода (реализована в os_kernel.cpp)
 void osPrintf(const char* fmt, ...);

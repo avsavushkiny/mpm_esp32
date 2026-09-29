@@ -54,7 +54,7 @@ static const ShellCommand g_commands[] = {
     {"userdel",  cmdUserdel,  "userdel <name>"},
 
     {"privs",    cmdPrivs,    "privs        - show privilege table (root only)"},
-    {"reboot",   cmdReboot,   "reboot       - restart the system"},
+    {"reboot",   cmdReboot,   "reboot [now] - restart the system"},
 };
 
 const ShellCommand* osCliCommands(size_t& count)
@@ -474,18 +474,32 @@ static void cmdPrivs(CliContext* ctx, int, char**)
 }
 
 // ---------- reboot ----------
-static void cmdReboot(CliContext* ctx, int, char**)
+static void cmdReboot(CliContext* ctx, int argc, char** argv)
 {
     if (!osUserHasPriv(OS_PRIV_REBOOT)) {
         cliWrite(ctx, "Permission denied.\r\n");
         return;
     }
 
-    cliWrite(ctx, "System is going down for reboot NOW.\r\n");
-    cliWrite(ctx, "See you in a few seconds...\r\n");
+    // Опционально: `reboot now` — пропустить задержку
+    bool immediate = (argc >= 2 && strcmp(argv[1], "now") == 0);
 
-    // Дать буферам UART/telnet время отправить всё
-    vTaskDelay(pdMS_TO_TICKS(500));
+    if (immediate) {
+        cliWrite(ctx, "System is going down for reboot NOW.\r\n");
+        vTaskDelay(pdMS_TO_TICKS(200));
+        ESP.restart();
+        return;
+    }
+
+    // Отложенная перезагрузка с уведомлением всех консолей
+    cliWrite(ctx, "Broadcasting reboot notice to all sessions...\r\n");
+    cliWrite(ctx, "System will reboot in 5 seconds.\r\n");
+
+    osNotifyAllAndWait(
+        "System is going down for reboot in 60 seconds.\r\n"
+        "Save your work. Reconnect after the reboot.",
+        60000    // ждём 60 секунд, чтобы все успели увидеть
+    );
 
     ESP.restart();
 }

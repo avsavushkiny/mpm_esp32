@@ -43,3 +43,10 @@ void osFlagSet(ProcessDescriptor* proc, EventBits_t bits);
 void osFlagSetFromISR(ProcessDescriptor* proc, EventBits_t bits);
 
 UBaseType_t osMapPriority(uint8_t mpmPrio);
+
+// Уведомления пользователей
+void osNotifyAll(const char* message);        // разослать всем консолям
+void osNotifyAllAndWait(const char* message, uint32_t waitMs);  // и подождать
+void osNotifyAll(const char* message);
+void osNotifyAllAndWait(const char* message, uint32_t waitMs);
+bool osNotifyPoll(uint32_t* localEpoch, char* out, size_t maxLen);

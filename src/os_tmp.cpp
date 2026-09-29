@@ -47,7 +47,6 @@ static void serialTmpTask(void*)
     ctx.read      = serialRead;
     ctx.user      = nullptr;
 
-    // Serial = доверенный канал, сразу root
     ProcessDescriptor* self = osProcessCurrent();
     if (self) self->userNumber = OS_UID_ROOT;
 
@@ -57,7 +56,18 @@ static void serialTmpTask(void*)
     osCliPrompt(&ctx);
 
     char line[OS_CLI_LINE_MAX];
+    char notice[OS_NOTICE_MAX_LEN];
+    uint32_t noticeEpoch = 0;
+
     for (;;) {
+        // Проверяем новые уведомления
+        if (osNotifyPoll(&noticeEpoch, notice, sizeof(notice))) {
+            serialWrite("\r\n\r\n*** SYSTEM NOTICE ***\r\n", nullptr);
+            serialWrite(notice, nullptr);
+            serialWrite("\r\n\r\n", nullptr);
+            osCliPrompt(&ctx);   // восстановить приглашение после прерывания
+        }
+
         int n = serialRead(line, sizeof(line), nullptr);
         if (n > 0) {
             serialWrite("\r\n", nullptr);
@@ -254,8 +264,30 @@ static void telnetTmpTask(void* arg)
     telnetWrite(".\r\nType 'help' for commands.\r\n", t);
     osCliPrompt(&ctx);
 
+    // char line[OS_CLI_LINE_MAX];
+    // while (t->client.connected()) {
+    //     int n = telnetRead(line, sizeof(line), t);
+    //     if (n > 0) {
+    //         telnetWrite("\r\n", t);
+    //         osCliExecute(&ctx, line);
+    //     }
+    //     vTaskDelay(pdMS_TO_TICKS(10));
+    // }
+    
+    // Уведомления
     char line[OS_CLI_LINE_MAX];
+    char notice[OS_NOTICE_MAX_LEN];
+    uint32_t noticeEpoch = 0;
+
     while (t->client.connected()) {
+        // Проверяем новые уведомления
+        if (osNotifyPoll(&noticeEpoch, notice, sizeof(notice))) {
+            telnetWrite("\r\n\r\n*** SYSTEM NOTICE ***\r\n", t);
+            telnetWrite(notice, t);
+            telnetWrite("\r\n\r\n", t);
+            osCliPrompt(&ctx);
+        }
+
         int n = telnetRead(line, sizeof(line), t);
         if (n > 0) {
             telnetWrite("\r\n", t);
