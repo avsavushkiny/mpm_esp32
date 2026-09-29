@@ -7,6 +7,7 @@
 #include "os_net.h"
 #include "os_cli.h"
 #include "os_tmp.h"
+#include "os_user.h"
 
 // ---------- Демо-задачи ----------
 static void heartbeatTask(void*)
@@ -73,6 +74,7 @@ void setup()
     if (!osKernelInit()) { osPrintf("kernel init failed\r\n"); return; }
     if (!osTimeInit())   { osPrintf("time init failed\r\n");   return; }
     if (!osIpcInit())    { osPrintf("ipc init failed\r\n");    return; }
+    if (!osUserInit())   { osPrintf("user init failed\r\n");   return; }
 
     osFsInit();
     osNetInit("Allowed-2g", "Serjant1985");

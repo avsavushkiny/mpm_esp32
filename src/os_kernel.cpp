@@ -1,6 +1,7 @@
 #include "os_kernel.h"
 #include <stdarg.h>
 #include <string.h>
+#include "os_user.h"
 #include "driver/uart.h"
 
 // ---------- Статическая таблица ----------
@@ -187,6 +188,12 @@ ProcessDescriptor* osProcessCurrent()
 // ---------- Завершение (с защитой от гонки) ----------
 bool osProcessKill(uint16_t pid)
 {
+    // ---- Проверка прав ----
+    if (!osUserHasPriv(OS_PRIV_KILL_PROC)) {
+        OS_LOG("kill denied: no privilege");
+        return false;
+    }
+
     if (xSemaphoreTake(g_procMutex, portMAX_DELAY) != pdTRUE) return false;
 
     ProcessDescriptor* proc = nullptr;
@@ -197,9 +204,16 @@ bool osProcessKill(uint16_t pid)
         return false;
     }
 
+    // Запрет на убийство самого себя (защита от brick)
+    ProcessDescriptor* cur = osProcessCurrent();
+    if (cur && cur->pid == pid) {
+        xSemaphoreGive(g_procMutex);
+        return false;
+    }
+
     TaskHandle_t t = proc->task;
     proc->state = ProcState::TERMINATED;
-    proc->task  = nullptr;     // сразу обнуляем, чтобы trampoline не чистил дважды
+    proc->task  = nullptr;
     proc->pid   = 0;
     if (proc->flags) { vEventGroupDelete(proc->flags); proc->flags = nullptr; }
 

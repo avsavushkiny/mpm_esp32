@@ -3,6 +3,7 @@
 #include "os_time.h"
 #include "os_fs.h"
 #include "os_net.h"
+#include "os_user.h"
 #include <stdarg.h>
 
 static void cmdHelp(CliContext*, int, char**);
@@ -18,19 +19,42 @@ static void cmdLs(CliContext*, int, char**);
 static void cmdCat(CliContext*, int, char**);
 static void cmdEcho(CliContext*, int, char**);
 
+static void cmdWho(CliContext*, int, char**);
+static void cmdLogin(CliContext*, int, char**);
+static void cmdLogout(CliContext*, int, char**);
+static void cmdPasswd(CliContext*, int, char**);
+static void cmdSu(CliContext*, int, char**);
+static void cmdUsers(CliContext*, int, char**);
+static void cmdUseradd(CliContext*, int, char**);
+static void cmdUserdel(CliContext*, int, char**);
+
+static void cmdPrivs(CliContext*, int, char**);
+static void cmdReboot(CliContext*, int, char**);
+
 static const ShellCommand g_commands[] = {
-    {"help",   cmdHelp,   "Show this help"},
-    {"ps",     cmdPs,     "List processes"},
-    {"kill",   cmdKill,   "kill <pid>"},
-    {"attach", cmdAttach, "attach <pid>"},
-    {"detach", cmdDetach, "detach <pid>"},
-    {"abort",  cmdAbort,  "abort <pid>"},
-    {"show",   cmdShow,   "System status"},
-    {"user",   cmdUser,   "user <n>"},
-    {"stat",   cmdStat,   "Statistics"},
-    {"ls",     cmdLs,     "List files"},
-    {"cat",    cmdCat,    "cat <file>"},
-    {"echo",   cmdEcho,   "echo <text>"},
+    {"help",     cmdHelp,     "Show this help"},
+    {"ps",       cmdPs,       "List processes"},
+    {"kill",     cmdKill,     "kill <pid>"},
+    {"attach",   cmdAttach,   "attach <pid>"},
+    {"detach",   cmdDetach,   "detach <pid>"},
+    {"abort",    cmdAbort,    "abort <pid>"},
+    {"show",     cmdShow,     "System status"},
+    {"user",     cmdUser,     "user <n>     - switch user (deprecated)"},
+    {"stat",     cmdStat,     "Statistics"},
+    {"ls",       cmdLs,       "List files"},
+    {"cat",      cmdCat,      "cat <file>"},
+    {"echo",     cmdEcho,     "echo <text>"},
+    {"who",      cmdWho,      "who          - list active sessions"},
+    {"login",    cmdLogin,    "login <name> - re-authenticate"},
+    {"logout",   cmdLogout,   "logout       - drop privileges"},
+    {"passwd",   cmdPasswd,   "passwd       - change password"},
+    {"su",       cmdSu,       "su <name>    - switch user"},
+    {"users",    cmdUsers,    "users        - list users"},
+    {"useradd",  cmdUseradd,  "useradd <name> <pass> <privs>"},
+    {"userdel",  cmdUserdel,  "userdel <name>"},
+
+    {"privs",    cmdPrivs,    "privs        - show privilege table (root only)"},
+    {"reboot",   cmdReboot,   "reboot       - restart the system"},
 };
 
 const ShellCommand* osCliCommands(size_t& count)
@@ -136,6 +160,10 @@ static void cmdPs(CliContext* ctx, int, char**)
 static void cmdKill(CliContext* ctx, int argc, char** argv)
 {
     if (argc < 2) { cliWrite(ctx, "usage: kill <pid>\r\n"); return; }
+    if (!osUserHasPriv(OS_PRIV_KILL_PROC)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
     uint16_t pid = (uint16_t)atoi(argv[1]);
     cliPrintf(ctx, osProcessKill(pid) ? "killed %u\r\n" : "no such process\r\n", pid);
 }
@@ -143,6 +171,10 @@ static void cmdKill(CliContext* ctx, int argc, char** argv)
 static void cmdAttach(CliContext* ctx, int argc, char** argv)
 {
     if (argc < 2) { cliWrite(ctx, "usage: attach <pid>\r\n"); return; }
+    if (!osUserHasPriv(OS_PRIV_ATTACH)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
     uint16_t pid = (uint16_t)atoi(argv[1]);
     cliPrintf(ctx, osProcessAttach(pid, ctx->consoleId)
                    ? "attached %u\r\n" : "no such process\r\n", pid);
@@ -159,9 +191,14 @@ static void cmdAbort(CliContext* ctx, int argc, char** argv) { cmdKill(ctx, argc
 
 static void cmdShow(CliContext* ctx, int, char**)
 {
+    ProcessDescriptor* cur = osProcessCurrent();
+    const OsUser* u = cur ? osUserFindByUid(cur->userNumber) : nullptr;
+
     OsTime t = osTimeGet();
     cliPrintf(ctx, "%s\r\n", OS_VERSION);
     cliPrintf(ctx, "Build:      %s\r\n", OS_BUILD_DATE);
+    cliPrintf(ctx, "User:       %s (uid=%lu)\r\n",
+              u ? u->name : "?", (unsigned long)(cur ? cur->userNumber : 0));
     cliPrintf(ctx, "Uptime:     %lu ms (%lu s)\r\n",
               (unsigned long)t.ticks, (unsigned long)t.seconds);
     cliPrintf(ctx, "Free heap:  %lu bytes\r\n", (unsigned long)ESP.getFreeHeap());
@@ -219,4 +256,236 @@ static void cmdEcho(CliContext* ctx, int argc, char** argv)
         if (i < argc - 1) cliWrite(ctx, " ");
     }
     cliWrite(ctx, "\r\n");
+}
+
+// ---------- who ----------
+static void whoCallback(const ProcessDescriptor& p, void* user)
+{
+    CliContext* ctx = static_cast<CliContext*>(user);
+    if (p.consoleId == 0) return;
+
+    const OsUser* u = osUserFindByUid(p.userNumber);
+    const char* uname = u ? u->name : "?";
+
+    cliPrintf(ctx, "  CONSOLE %u  USER %-12s  PID %u  %s\r\n",
+              p.consoleId, uname, p.pid, p.name);
+}
+
+static void cmdWho(CliContext* ctx, int, char**)
+{
+    cliWrite(ctx, "  CONSOLE  USER          PID   NAME\r\n");
+    osProcessList(whoCallback, ctx);
+}
+
+// ---------- login ----------
+static void cmdLogin(CliContext* ctx, int argc, char** argv)
+{
+    if (argc < 2) { cliWrite(ctx, "usage: login <name>\r\n"); return; }
+
+    cliWrite(ctx, "Password: ");
+    char pass[OS_PASSWORD_MAX];
+    int n = ctx->read(pass, sizeof(pass), ctx->user);
+    if (n <= 0) { cliWrite(ctx, "\r\nCancelled.\r\n"); return; }
+
+    uint32_t uid = osUserAuth(argv[1], pass);
+    if (uid == OS_UID_NOBODY) {
+        cliWrite(ctx, "\r\nLogin failed.\r\n");
+        return;
+    }
+
+    ProcessDescriptor* cur = osProcessCurrent();
+    if (cur) {
+        cur->userNumber = uid;
+        cliPrintf(ctx, "\r\nLogged in as %s (uid=%lu)\r\n",
+                  argv[1], (unsigned long)uid);
+    }
+}
+
+// ---------- logout ----------
+static void cmdLogout(CliContext* ctx, int, char**)
+{
+    ProcessDescriptor* cur = osProcessCurrent();
+    if (!cur) return;
+    cur->userNumber = OS_UID_GUEST;
+    cliWrite(ctx, "Logged out. Now guest.\r\n");
+}
+
+// ---------- passwd ----------
+static void cmdPasswd(CliContext* ctx, int, char**)
+{
+    ProcessDescriptor* cur = osProcessCurrent();
+    if (!cur) return;
+
+    const OsUser* u = osUserFindByUid(cur->userNumber);
+    if (!u) { cliWrite(ctx, "No user.\r\n"); return; }
+
+    cliWrite(ctx, "Old password: ");
+    char oldPass[OS_PASSWORD_MAX];
+    if (ctx->read(oldPass, sizeof(oldPass), ctx->user) <= 0) return;
+
+    cliWrite(ctx, "\r\nNew password: ");
+    char newPass[OS_PASSWORD_MAX];
+    if (ctx->read(newPass, sizeof(newPass), ctx->user) <= 0) return;
+
+    cliWrite(ctx, "\r\nRepeat: ");
+    char repPass[OS_PASSWORD_MAX];
+    if (ctx->read(repPass, sizeof(repPass), ctx->user) <= 0) return;
+
+    if (strcmp(newPass, repPass) != 0) {
+        cliWrite(ctx, "\r\nPasswords don't match.\r\n");
+        return;
+    }
+
+    if (osUserChangePassword(cur->userNumber, oldPass, newPass))
+        cliWrite(ctx, "\r\nPassword changed.\r\n");
+    else
+        cliWrite(ctx, "\r\nFailed.\r\n");
+}
+
+// ---------- su ----------
+static void cmdSu(CliContext* ctx, int argc, char** argv)
+{
+    if (!osUserHasPriv(OS_PRIV_USER_MGMT)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
+    if (argc < 2) { cliWrite(ctx, "usage: su <name>\r\n"); return; }
+
+    const OsUser* u = osUserFindByName(argv[1]);
+    if (!u) { cliWrite(ctx, "No such user.\r\n"); return; }
+
+    ProcessDescriptor* cur = osProcessCurrent();
+    if (cur) {
+        cur->userNumber = u->uid;
+        cliPrintf(ctx, "Now %s\r\n", u->name);
+    }
+}
+
+// ---------- users ----------
+static void usersCallback(const OsUser& u, void* user)
+{
+    CliContext* ctx = static_cast<CliContext*>(user);
+    cliPrintf(ctx, "  uid=%-4lu  %-12s  priv=0x%02X  %s\r\n",
+              (unsigned long)u.uid, u.name, u.privileges,
+              u.enabled ? "enabled" : "disabled");
+}
+
+static void cmdUsers(CliContext* ctx, int, char**)
+{
+    if (!osUserHasPriv(OS_PRIV_USER_MGMT)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
+    cliWrite(ctx, "  UID    NAME          PRIVS      STATUS\r\n");
+    osUserList(usersCallback, ctx);
+}
+
+// ---------- useradd ----------
+static void cmdUseradd(CliContext* ctx, int argc, char** argv)
+{
+    if (!osUserHasPriv(OS_PRIV_USER_MGMT)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
+    if (argc < 4) {
+        cliWrite(ctx, "usage: useradd <name> <password> <privs_hex>\r\n");
+        return;
+    }
+    uint8_t privs = (uint8_t)strtol(argv[3], nullptr, 16);
+    if (osUserCreate(argv[1], argv[2], privs))
+        cliPrintf(ctx, "User %s created.\r\n", argv[1]);
+    else
+        cliWrite(ctx, "Failed (duplicate or no slot).\r\n");
+}
+
+// ---------- userdel ----------
+static void cmdUserdel(CliContext* ctx, int argc, char** argv)
+{
+    if (!osUserHasPriv(OS_PRIV_USER_MGMT)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
+    if (argc < 2) { cliWrite(ctx, "usage: userdel <name>\r\n"); return; }
+    if (osUserDelete(argv[1]))
+        cliPrintf(ctx, "User %s deleted.\r\n", argv[1]);
+    else
+        cliWrite(ctx, "Failed (root cannot be deleted).\r\n");
+}
+
+// ---------- privs ----------
+// Вариант с выводом через CliContext (работает и в Serial, и в telnet)
+static void cmdPrivs(CliContext* ctx, int, char**)
+{
+    if (!osUserHasPriv(OS_PRIV_USER_MGMT)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
+
+    // --- Текущий пользователь ---
+    ProcessDescriptor* cur = osProcessCurrent();
+    const OsUser* me = cur ? osUserFindByUid(cur->userNumber) : nullptr;
+    if (me) {
+        cliPrintf(ctx, "Current user: %s (uid=%lu, privs=0x%02X)\r\n\r\n",
+                  me->name, (unsigned long)me->uid, me->privileges);
+    }
+    // --- Расшифровка прав текущего пользователя ---
+    // if (me)
+    // {
+    //     cliPrintf(ctx, "Your privileges (0x%02X):\r\n", me->privileges);
+    //     struct
+    //     {
+    //         uint8_t bit;
+    //         const char *name;
+    //     } map[] = {
+    //         {OS_PRIV_READ_FS, "READ_FS"},
+    //         {OS_PRIV_WRITE_FS, "WRITE_FS"},
+    //         {OS_PRIV_KILL_PROC, "KILL_PROC"},
+    //         {OS_PRIV_ATTACH, "ATTACH"},
+    //         {OS_PRIV_USER_MGMT, "USER_MGMT"},
+    //         {OS_PRIV_REBOOT, "REBOOT"},
+    //     };
+    //     for (auto &m : map)
+    //     {
+    //         cliPrintf(ctx, "  [%c] %s\r\n",
+    //                   (me->privileges & m.bit) ? 'X' : ' ',
+    //                   m.name);
+    //     }
+    //     cliWrite(ctx, "\r\n");
+    // }
+
+    cliWrite(ctx, "  BIT    HEX    CONSTANT              DESCRIPTION\r\n");
+    cliWrite(ctx, "  -----  -----  --------------------  ------------------------------\r\n");
+    cliWrite(ctx, "    0    0x01   OS_PRIV_READ_FS       read files (ls, cat)\r\n");
+    cliWrite(ctx, "    1    0x02   OS_PRIV_WRITE_FS      write/delete files\r\n");
+    cliWrite(ctx, "    2    0x04   OS_PRIV_KILL_PROC     kill/abort processes\r\n");
+    cliWrite(ctx, "    3    0x08   OS_PRIV_ATTACH        attach/detach consoles\r\n");
+    cliWrite(ctx, "    4    0x10   OS_PRIV_USER_MGMT     useradd/userdel/users/su\r\n");
+    cliWrite(ctx, "    5    0x20   OS_PRIV_REBOOT        reboot system\r\n");
+    cliWrite(ctx, "  -----  -----  --------------------  ------------------------------\r\n");
+    cliWrite(ctx, "  All    0xFF   OS_PRIV_ALL           full access (root)\r\n");
+    cliWrite(ctx, "\r\n");
+    cliWrite(ctx, "  Common combinations:\r\n");
+    cliWrite(ctx, "    0x00  - no rights (nobody)\r\n");
+    cliWrite(ctx, "    0x01  - read-only (guest)\r\n");
+    cliWrite(ctx, "    0x03  - read + write files\r\n");
+    cliWrite(ctx, "    0x0F  - files + kill + attach (normal user)\r\n");
+    cliWrite(ctx, "    0x1F  - everything except reboot\r\n");
+    cliWrite(ctx, "    0xFF  - full access (root)\r\n");
+}
+
+// ---------- reboot ----------
+static void cmdReboot(CliContext* ctx, int, char**)
+{
+    if (!osUserHasPriv(OS_PRIV_REBOOT)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
+
+    cliWrite(ctx, "System is going down for reboot NOW.\r\n");
+    cliWrite(ctx, "See you in a few seconds...\r\n");
+
+    // Дать буферам UART/telnet время отправить всё
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    ESP.restart();
 }

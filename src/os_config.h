@@ -45,7 +45,7 @@ enum class ProcState : uint8_t {
 #define OS_FLAG_USER2          (1 << 9)
 
 // ---------- Версия ----------
-#define OS_VERSION             "MP/M-ESP32 v1.0"
+#define OS_VERSION             "MP/M-32 v1.1"
 #define OS_BUILD_DATE          __DATE__ " " __TIME__
 
 // ---------- Отладка ----------
@@ -55,6 +55,27 @@ enum class ProcState : uint8_t {
 #else
   #define OS_LOG(fmt, ...) do {} while (0)
 #endif
+
+// ---------- Права пользователя (битовая маска) ----------
+#define OS_PRIV_NONE        0x00   // ничего нельзя
+#define OS_PRIV_READ_FS     0x01   // читать файлы
+#define OS_PRIV_WRITE_FS    0x02   // писать файлы
+#define OS_PRIV_KILL_PROC   0x04   // kill/abort других процессов
+#define OS_PRIV_ATTACH      0x08   // attach/detach
+#define OS_PRIV_USER_MGMT   0x10   // user/passwd/su
+#define OS_PRIV_REBOOT      0x20   // перезагрузка
+#define OS_PRIV_ALL         0xFF   // всё
+
+// ---------- Лимиты пользователей ----------
+#define OS_MAX_USERS        8
+#define OS_USERNAME_MAX     16
+#define OS_PASSWORD_MAX     32
+#define OS_PASSWORD_HASH    32      // размер hex-хэша SHA-256
+
+// ---------- Стандартные UID ----------
+#define OS_UID_ROOT         0
+#define OS_UID_GUEST        1
+#define OS_UID_NOBODY       255     // никому не принадлежит
 
 // Единая точка безопасного вывода (реализована в os_kernel.cpp)
 void osPrintf(const char* fmt, ...);

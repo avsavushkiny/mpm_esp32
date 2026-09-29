@@ -1,6 +1,7 @@
 #include "os_tmp.h"
 #include "os_cli.h"
 #include "os_kernel.h"
+#include "os_user.h"
 #include "driver/uart.h"
 
 // ---------- Serial TMP ----------
@@ -46,7 +47,12 @@ static void serialTmpTask(void*)
     ctx.read      = serialRead;
     ctx.user      = nullptr;
 
+    // Serial = доверенный канал, сразу root
+    ProcessDescriptor* self = osProcessCurrent();
+    if (self) self->userNumber = OS_UID_ROOT;
+
     serialWrite("\r\n" OS_VERSION "\r\n", nullptr);
+    serialWrite("Logged in as root (serial console).\r\n", nullptr);
     serialWrite("Type 'help' for commands.\r\n", nullptr);
     osCliPrompt(&ctx);
 
@@ -61,22 +67,14 @@ static void serialTmpTask(void*)
     }
 }
 
-// bool osTmpInitSerial()
-// {
-//     ProcessDescriptor* p = osProcessCreate(
-//         "tmp-serial",
-//         serialTmpTask,
-//         12288,                 // <-- увеличено с 4096
-//         OS_PRIO_NORMAL,
-//         OS_CORE_APP
-//     );
-//     return p != nullptr;
-// }
 bool osTmpInitSerial()
 {
     ProcessDescriptor* p = osProcessCreate(
         "tmp-serial", serialTmpTask, 12288, OS_PRIO_NORMAL, OS_CORE_APP);
-    if (p) p->consoleId = 1;
+    if (p) {
+        p->consoleId  = 1;
+        p->userNumber = OS_UID_ROOT;   // root по умолчанию
+    }
     return p != nullptr;
 }
 
@@ -158,6 +156,52 @@ static int telnetRead(char* buf, size_t max, void* user)
     return (int)n;
 }
 
+// Хелпер: прочитать строку с telnet-клиента, без эха (для пароля)
+static int telnetReadNoEcho(TelnetCtx* t, char* buf, size_t max)
+{
+    size_t n = 0;
+    while (n < max - 1) {
+        // Если клиент отключился — выходим
+        if (!t->client.connected()) break;
+
+        if (!t->client.available()) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;                 // <-- ЖДЁМ бесконечно, пока не придёт байт
+        }
+
+        int c = t->client.read();
+        if (c < 0) break;
+
+        // IAC
+        if (c == 0xFF) {
+            if (t->client.available()) {
+                int cmd = t->client.read();
+                if (cmd >= 0xFB && cmd <= 0xFE && t->client.available())
+                    t->client.read();
+            }
+            continue;
+        }
+
+        // Backspace (без эха)
+        if (c == 127 || c == 8) {
+            if (n > 0) n--;
+            continue;
+        }
+
+        // CR / LF — конец строки
+        if (c == '\r' || c == '\n') {
+            if (n == 0) continue;
+            break;
+        }
+
+        buf[n++] = (char)c;
+        // НЕТ t->client.print — это no-echo версия
+    }
+
+    buf[n] = '\0';
+    return (int)n;
+}
+
 static void telnetTmpTask(void* arg)
 {
     TelnetCtx* t = static_cast<TelnetCtx*>(arg);
@@ -169,7 +213,45 @@ static void telnetTmpTask(void* arg)
     ctx.user      = t;
 
     telnetWrite("\r\n" OS_VERSION "\r\n", t);
-    telnetWrite("Telnet session ready.\r\n", t);
+
+    // ---- Аутентификация ----
+    char user[OS_USERNAME_MAX];
+    char pass[OS_PASSWORD_MAX];
+    uint32_t uid = OS_UID_NOBODY;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        telnetWrite("login: ", t);
+        if (telnetReadNoEcho(t, user, sizeof(user)) <= 0) {
+            telnetWrite("\r\n", t);
+            continue;
+        }
+        telnetWrite("\r\nPassword: ", t);
+        if (telnetReadNoEcho(t, pass, sizeof(pass)) <= 0) {
+            telnetWrite("\r\n", t);
+            continue;
+        }
+        telnetWrite("\r\n", t);
+
+        uid = osUserAuth(user, pass);
+        if (uid != OS_UID_NOBODY) break;
+        telnetWrite("Login incorrect.\r\n", t);
+    }
+
+    if (uid == OS_UID_NOBODY) {
+        telnetWrite("Too many failed attempts. Goodbye.\r\n", t);
+        t->client.stop();
+        delete t;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // ---- Устанавливаем uid процессу ----
+    ProcessDescriptor* self = osProcessCurrent();
+    if (self) self->userNumber = uid;
+
+    telnetWrite("Welcome, ", t);
+    telnetWrite(user, t);
+    telnetWrite(".\r\nType 'help' for commands.\r\n", t);
     osCliPrompt(&ctx);
 
     char line[OS_CLI_LINE_MAX];
@@ -188,6 +270,7 @@ static void telnetTmpTask(void* arg)
     vTaskDelete(nullptr);
 }
 
+// Счётчик консолей для telnet-сессий
 static uint16_t g_nextConsole = 2;
 
 void osTmpHandleTelnetClient(WiFiClient& client)
@@ -207,6 +290,6 @@ void osTmpHandleTelnetClient(WiFiClient& client)
         delete t;
         return;
     }
-
     p->consoleId = t->consoleId;
+    // userNumber будет установлен в telnetTmpTask после аутентификации
 }
