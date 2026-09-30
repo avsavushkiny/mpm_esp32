@@ -77,8 +77,9 @@ void setup()
     if (!osUserInit())   { osPrintf("user init failed\r\n");   return; }
 
     osFsInit();
-    osNetInit("Allowed-2g", "Serjant1985");
-    osNetStartTelnet(23);
+    // osNetInit("RT-GPON-6089", "u7PxRkFQ");
+    osNetInit("Allowed-IoT", "Mup80673");
+    !!osNetStartTelnet(23);
 
     osCliInit();
     osTmpInitSerial();
