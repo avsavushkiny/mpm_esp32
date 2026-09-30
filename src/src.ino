@@ -19,6 +19,7 @@ static void heartbeatTask(void*)
                (unsigned long)n, (unsigned long)ESP.getFreeHeap());
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
+    // сюда никогда не попадём — задача бесконечная
 }
 
 static void flagWaiterTask(void*)

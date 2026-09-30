@@ -14,9 +14,6 @@ static void osNoticeInit();
 // ---------- Безопасный вывод через UART0 ----------
 void osPrintf(const char* fmt, ...)
 {
-    if (!g_printMutex) return;
-    if (xSemaphoreTake(g_printMutex, portMAX_DELAY) != pdTRUE) return;
-
     char buf[192];
     va_list args;
     va_start(args, fmt);
@@ -24,19 +21,18 @@ void osPrintf(const char* fmt, ...)
     va_end(args);
 
     if (n > 0) {
-        if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
-        uart_write_bytes(UART_NUM_0, buf, n);
+        // Просто пишем в UART. ESP32 UART имеет свой аппаратный буфер.
+        // Если переполнение — байты потеряются, но система не зависнет.
+        uart_write_bytes(UART_NUM_0, buf, n > (int)sizeof(buf) - 1 ? sizeof(buf) - 1 : n);
     }
-
-    xSemaphoreGive(g_printMutex);
 }
 
 // ---------- Инициализация ----------
 bool osKernelInit()
 {
     g_procMutex  = xSemaphoreCreateMutex();
-    g_printMutex = xSemaphoreCreateMutex();
-    if (!g_procMutex || !g_printMutex) return false;
+    // g_printMutex = xSemaphoreCreateMutex();
+    if (!g_procMutex /*|| !g_printMutex*/) return false;
 
     osNoticeInit();
 
@@ -191,11 +187,13 @@ ProcessDescriptor* osProcessCurrent()
 // ---------- Завершение (с защитой от гонки) ----------
 bool osProcessKill(uint16_t pid)
 {
-    // ---- Проверка прав ----
     if (!osUserHasPriv(OS_PRIV_KILL_PROC)) {
         OS_LOG("kill denied: no privilege");
         return false;
     }
+
+    // Получаем handle текущей задачи БЕЗ мьютекса
+    TaskHandle_t me = xTaskGetCurrentTaskHandle();
 
     if (xSemaphoreTake(g_procMutex, portMAX_DELAY) != pdTRUE) return false;
 
@@ -207,9 +205,8 @@ bool osProcessKill(uint16_t pid)
         return false;
     }
 
-    // Запрет на убийство самого себя (защита от brick)
-    ProcessDescriptor* cur = osProcessCurrent();
-    if (cur && cur->pid == pid) {
+    // Запрет самоубийства — сравниваем handle, а не вызываем osProcessCurrent
+    if (proc->task == me) {
         xSemaphoreGive(g_procMutex);
         return false;
     }

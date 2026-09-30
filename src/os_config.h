@@ -45,7 +45,7 @@ enum class ProcState : uint8_t {
 #define OS_FLAG_USER2          (1 << 9)
 
 // ---------- Версия ----------
-#define OS_VERSION             "MP/M-32 v1.1"
+#define OS_VERSION             "MP/M-32 v1.2"
 #define OS_BUILD_DATE          __DATE__ " " __TIME__
 
 // ---------- Отладка ----------

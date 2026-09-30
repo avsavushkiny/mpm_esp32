@@ -83,7 +83,7 @@ bool osUserInit()
     // guest: только чтение, пароль пустой
     g_users[1].uid        = OS_UID_GUEST;
     strncpy(g_users[1].name, "guest", OS_USERNAME_MAX - 1);
-    osUserHashPassword("", g_users[1].passHash);
+    osUserHashPassword("guest", g_users[1].passHash);
     g_users[1].privileges = OS_PRIV_READ_FS;
     g_users[1].enabled    = true;
 
