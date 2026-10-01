@@ -170,16 +170,42 @@ static void cmdKill(CliContext* ctx, int argc, char** argv)
     cliPrintf(ctx, osProcessKill(pid) ? "killed %u\r\n" : "no such process\r\n", pid);
 }
 
+// static void cmdAttach(CliContext* ctx, int argc, char** argv)
+// {
+//     if (argc < 2) { cliWrite(ctx, "usage: attach <pid>\r\n"); return; }
+//     if (!osUserHasPriv(OS_PRIV_ATTACH)) {
+//         cliWrite(ctx, "Permission denied.\r\n");
+//         return;
+//     }
+//     uint16_t pid = (uint16_t)atoi(argv[1]);
+//     cliPrintf(ctx, osProcessAttach(pid, ctx->consoleId)
+//                    ? "attached %u\r\n" : "no such process\r\n", pid);
+// }
+
 static void cmdAttach(CliContext* ctx, int argc, char** argv)
 {
-    if (argc < 2) { cliWrite(ctx, "usage: attach <pid>\r\n"); return; }
+    if (argc < 2) {
+        cliWrite(ctx, "usage: attach <pid> [console]\r\n");
+        return;
+    }
     if (!osUserHasPriv(OS_PRIV_ATTACH)) {
         cliWrite(ctx, "Permission denied.\r\n");
         return;
     }
+
     uint16_t pid = (uint16_t)atoi(argv[1]);
-    cliPrintf(ctx, osProcessAttach(pid, ctx->consoleId)
-                   ? "attached %u\r\n" : "no such process\r\n", pid);
+
+    // Если console не указан — текущая консоль
+    uint16_t consoleId = ctx->consoleId;
+    if (argc >= 3) {
+        consoleId = (uint16_t)atoi(argv[2]);
+    }
+
+    if (osProcessAttach(pid, consoleId)) {
+        cliPrintf(ctx, "attached %u to console %u\r\n", pid, consoleId);
+    } else {
+        cliWrite(ctx, "no such process\r\n");
+    }
 }
 
 static void cmdDetach(CliContext* ctx, int argc, char** argv)
