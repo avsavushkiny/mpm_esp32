@@ -133,6 +133,12 @@ ProcessDescriptor* osProcessCreate(
     proc->flags       = xEventGroupCreate();
     if (!proc->flags) { proc->pid = 0; return nullptr; }
 
+    ProcessDescriptor* parent = osProcessCurrent();
+    if (parent) {
+        proc->consoleId  = parent->consoleId;
+        proc->userNumber = parent->userNumber;
+    }
+
     TaskStartCtx* ctx = new TaskStartCtx{proc, entry, arg};
     if (!ctx) {
         vEventGroupDelete(proc->flags);
@@ -245,24 +251,24 @@ void osProcessSetState(ProcessDescriptor* proc, ProcState s)
     if (proc) proc->state = s;
 }
 
-// ---------- Список: снимок под мьютексом, callback — без ----------
+// ---------- Процессы ----------
 void osProcessList(void (*cb)(const ProcessDescriptor&, void*), void* user)
 {
     if (!cb) return;
 
-    static ProcessDescriptor snapshot[OS_MAX_PROCESSES]; // non-static?
-    int count = 0;
+    if (xSemaphoreTake(g_procMutex, portMAX_DELAY) != pdTRUE) return;
 
-    if (xSemaphoreTake(g_procMutex, portMAX_DELAY) == pdTRUE) {
-        for (auto& p : g_procTable) {
-            if (p.pid != 0 && count < OS_MAX_PROCESSES) {
-                snapshot[count++] = p;
-            }
+    ProcessDescriptor local;   // одна копия ~64 байта на стеке
+
+    for (auto& p : g_procTable) {
+        if (p.pid != 0) {
+            local = p;                     // копия под мьютексом
+            xSemaphoreGive(g_procMutex);   // отпускаем
+            cb(local, user);                // callback без мьютекса
+            if (xSemaphoreTake(g_procMutex, portMAX_DELAY) != pdTRUE) return;
         }
-        xSemaphoreGive(g_procMutex);
     }
-
-    for (int i = 0; i < count; i++) cb(snapshot[i], user);
+    xSemaphoreGive(g_procMutex);
 }
 
 // ---------- Флаги ----------

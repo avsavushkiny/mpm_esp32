@@ -3,6 +3,7 @@
 #include "os_kernel.h"
 #include "os_user.h"
 #include "driver/uart.h"
+#include "os_console.h"
 
 // ---------- Serial TMP ----------
 static void serialWrite(const char* s, void*)
@@ -41,14 +42,25 @@ static int serialRead(char* buf, size_t max, void*)
 
 static void serialTmpTask(void*)
 {
+    // 1) Создаём очередь для исходящих сообщений
+    QueueHandle_t outq = xQueueCreate(8, OS_CONSOLE_MSG_MAX);
+
+    // 2) Регистрируем консоль
+    uint16_t consoleId = osConsoleRegister(outq, nullptr);
+    // consoleId будет 1 для первой консоли
+
+    // 3) Устанавливаем в свой дескриптор
+    ProcessDescriptor* self = osProcessCurrent();
+    if (self) {
+        self->consoleId  = consoleId;
+        self->userNumber = OS_UID_ROOT;
+    }
+
     CliContext ctx;
-    ctx.consoleId = 1;
+    ctx.consoleId = consoleId;
     ctx.write     = serialWrite;
     ctx.read      = serialRead;
     ctx.user      = nullptr;
-
-    ProcessDescriptor* self = osProcessCurrent();
-    if (self) self->userNumber = OS_UID_ROOT;
 
     serialWrite("\r\n" OS_VERSION "\r\n", nullptr);
     serialWrite("Logged in as root (serial console).\r\n", nullptr);
@@ -56,10 +68,20 @@ static void serialTmpTask(void*)
     osCliPrompt(&ctx);
 
     char line[OS_CLI_LINE_MAX];
+    char outmsg[OS_CONSOLE_MSG_MAX];
+
     char notice[OS_NOTICE_MAX_LEN];
     uint32_t noticeEpoch = 0;
 
     for (;;) {
+        // ---- Проверяем очередь исходящих сообщений ----
+        while (xQueueReceive(outq, outmsg, 0) == pdTRUE) {
+            serialWrite("\r\n[out] ", nullptr);
+            serialWrite(outmsg, nullptr);
+            serialWrite("\r\n", nullptr);
+            osCliPrompt(&ctx);   // восстановить приглашение
+        }
+
         // Проверяем новые уведомления
         if (osNotifyPoll(&noticeEpoch, notice, sizeof(notice))) {
             serialWrite("\r\n\r\n*** SYSTEM NOTICE ***\r\n", nullptr);
@@ -68,6 +90,7 @@ static void serialTmpTask(void*)
             osCliPrompt(&ctx);   // восстановить приглашение после прерывания
         }
 
+        // ---- Читаем ввод ----
         int n = serialRead(line, sizeof(line), nullptr);
         if (n > 0) {
             serialWrite("\r\n", nullptr);
@@ -88,18 +111,25 @@ bool osTmpInitSerial()
     return p != nullptr;
 }
 
+
+
 // ---------- Telnet TMP ----------
+// Контекст одной telnet-сессии
 struct TelnetCtx {
     WiFiClient client;
-    uint16_t   consoleId;
+    uint16_t   consoleId;   // номер консоли (2, 3, 4, ...)
 };
 
+// ---------- Запись в сокет ----------
 static void telnetWrite(const char* s, void* user)
 {
     TelnetCtx* t = static_cast<TelnetCtx*>(user);
-    if (t && t->client.connected() && s) t->client.print(s);
+    if (t && t->client.connected() && s) {
+        t->client.print(s);
+    }
 }
 
+// ---------- Чтение строки с эхом (для CLI) ----------
 static int telnetRead(char* buf, size_t max, void* user)
 {
     TelnetCtx* t = static_cast<TelnetCtx*>(user);
@@ -110,9 +140,9 @@ static int telnetRead(char* buf, size_t max, void* user)
 
     while (n < max - 1) {
         if (!t->client.available()) {
-            // Строка начата и пауза > 50 мс — считаем ввод завершённым
+            // Если строка уже начата и пауза > 50 мс — считаем ввод завершённым
             if (n > 0 && (millis() - lastByteTime) > 50) break;
-            // Ничего не пришло и ждём > 500 мс — выходим с пустой строкой
+            // Если ничего не пришло и ждём > 500 мс — выходим с пустой строкой
             if (n == 0 && (millis() - lastByteTime) > 500) break;
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
@@ -121,13 +151,12 @@ static int telnetRead(char* buf, size_t max, void* user)
         int c = t->client.read();
         if (c < 0) break;
 
-        // --- IAC (Telnet control byte) ---
+        // --- IAC (Telnet control) ---
         if (c == 0xFF) {
             if (!t->client.available()) break;
             int cmd = t->client.read();
-
             if (cmd == 0xFA) {
-                // Subnegotiation: читаем до IAC SE (0xFF 0xF0)
+                // Subnegotiation — читаем до IAC SE
                 while (t->client.available()) {
                     int x = t->client.read();
                     if (x == 0xFF) {
@@ -137,16 +166,17 @@ static int telnetRead(char* buf, size_t max, void* user)
                     }
                 }
             } else if (cmd >= 0xFB && cmd <= 0xFE) {
-                // WILL / WONT / DO / DONT — за ними идёт байт опции
                 if (t->client.available()) t->client.read();
             }
-            // Остальные IAC-команды (IP, DM, NOP, ...) — просто пропускаем
             continue;
         }
 
         // --- Backspace ---
         if (c == 127 || c == 8) {
-            if (n > 0) { n--; t->client.print("\b \b"); }
+            if (n > 0) {
+                n--;
+                t->client.print("\b \b");
+            }
             continue;
         }
 
@@ -158,7 +188,7 @@ static int telnetRead(char* buf, size_t max, void* user)
 
         // --- Обычный символ ---
         buf[n++] = (char)c;
-        t->client.print((char)c);  // эхо
+        t->client.print((char)c);   // эхо
         lastByteTime = millis();
     }
 
@@ -166,17 +196,20 @@ static int telnetRead(char* buf, size_t max, void* user)
     return (int)n;
 }
 
-// Хелпер: прочитать строку с telnet-клиента, без эха (для пароля)
-static int telnetReadNoEcho(TelnetCtx* t, char* buf, size_t max)
+// ---------- Чтение строки без эха (для пароля) ----------
+// Возвращает: длину строки, -1 при разрыве, -2 при таймауте
+static int telnetReadNoEcho(TelnetCtx* t, char* buf, size_t max, uint32_t timeoutMs)
 {
     size_t n = 0;
+    uint32_t start = millis();
+
     while (n < max - 1) {
-        // Если клиент отключился — выходим
-        if (!t->client.connected()) break;
+        if (!t->client.connected()) return -1;
+        if (millis() - start > timeoutMs) return -2;
 
         if (!t->client.available()) {
             vTaskDelay(pdMS_TO_TICKS(10));
-            continue;                 // <-- ЖДЁМ бесконечно, пока не придёт байт
+            continue;
         }
 
         int c = t->client.read();
@@ -192,20 +225,11 @@ static int telnetReadNoEcho(TelnetCtx* t, char* buf, size_t max)
             continue;
         }
 
-        // Backspace (без эха)
-        if (c == 127 || c == 8) {
-            if (n > 0) n--;
-            continue;
-        }
-
-        // CR / LF — конец строки
-        if (c == '\r' || c == '\n') {
-            if (n == 0) continue;
-            break;
-        }
+        if (c == 127 || c == 8) { if (n > 0) n--; continue; }
+        if (c == '\r' || c == '\n') { if (n == 0) continue; break; }
 
         buf[n++] = (char)c;
-        // НЕТ t->client.print — это no-echo версия
+        start = millis();   // сбрасываем таймаут на каждый принятый байт
     }
 
     buf[n] = '\0';
@@ -215,31 +239,55 @@ static int telnetReadNoEcho(TelnetCtx* t, char* buf, size_t max)
 static void telnetTmpTask(void* arg)
 {
     TelnetCtx* t = static_cast<TelnetCtx*>(arg);
+    if (!t) {
+        vTaskDelete(nullptr);
+        return;
+    }
 
-    CliContext ctx;
-    ctx.consoleId = t->consoleId;
-    ctx.write     = telnetWrite;
-    ctx.read      = telnetRead;
-    ctx.user      = t;
+    const OsUser* u = nullptr;
+    uint32_t noticeEpoch = 0;
 
+    // ---------- 1. Создаём очередь исходящих сообщений ----------
+    QueueHandle_t outq = xQueueCreate(8, OS_CONSOLE_MSG_MAX);
+    if (!outq) {
+        telnetWrite("\r\nServer error: no queue.\r\n", t);
+        t->client.stop();
+        delete t;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // ---------- 2. Регистрируем консоль ----------
+    uint16_t consoleId = osConsoleRegister(outq, nullptr);
+    if (consoleId == 0) {
+        telnetWrite("\r\nServer error: no console slot.\r\n", t);
+        vQueueDelete(outq);
+        t->client.stop();
+        delete t;
+        vTaskDelete(nullptr);
+        return;
+    }
+    t->consoleId = consoleId;
+
+    // ---------- 3. Приветствие ----------
     telnetWrite("\r\n" OS_VERSION "\r\n", t);
 
-    // ---- Аутентификация ----
-    char user[OS_USERNAME_MAX];
-    char pass[OS_PASSWORD_MAX];
+    // ---------- 4. Аутентификация (3 попытки) ----------
+    char user[OS_USERNAME_MAX] = {0};
+    char pass[OS_PASSWORD_MAX] = {0};
     uint32_t uid = OS_UID_NOBODY;
 
     for (int attempt = 0; attempt < 3; attempt++) {
         telnetWrite("login: ", t);
-        if (telnetReadNoEcho(t, user, sizeof(user)) <= 0) {
-            telnetWrite("\r\n", t);
-            continue;
-        }
-        telnetWrite("\r\nPassword: ", t);
-        if (telnetReadNoEcho(t, pass, sizeof(pass)) <= 0) {
-            telnetWrite("\r\n", t);
-            continue;
-        }
+        int n = telnetReadNoEcho(t, user, sizeof(user), 60000);  // 60 сек
+        if (n == -1) { telnetWrite("\r\nDisconnected.\r\n", t); goto cleanup; }
+        if (n == -2) { telnetWrite("\r\nTimeout.\r\n", t);      goto cleanup; }
+        if (n == 0)  { telnetWrite("\r\n", t); continue; }
+
+        telnetWrite("Password: ", t);
+        n = telnetReadNoEcho(t, pass, sizeof(pass), 60000);
+        if (n == -1) { telnetWrite("\r\nDisconnected.\r\n", t); goto cleanup; }
+        if (n == -2) { telnetWrite("\r\nTimeout.\r\n", t);      goto cleanup; }
         telnetWrite("\r\n", t);
 
         uid = osUserAuth(user, pass);
@@ -249,56 +297,90 @@ static void telnetTmpTask(void* arg)
 
     if (uid == OS_UID_NOBODY) {
         telnetWrite("Too many failed attempts. Goodbye.\r\n", t);
-        t->client.stop();
-        delete t;
-        vTaskDelete(nullptr);
-        return;
+        goto cleanup;
     }
 
-    // ---- Устанавливаем uid процессу ----
-    ProcessDescriptor* self = osProcessCurrent();
-    if (self) self->userNumber = uid;
+    // ---------- 5. Устанавливаем uid и consoleId в дескриптор ----------
+    {
+        ProcessDescriptor* self = osProcessCurrent();
+        if (self) {
+            self->userNumber = uid;
+            self->consoleId  = consoleId;
+        }
+    }
 
+    // ---------- 6. Приветствие после логина ----------
+    // const OsUser* u = osUserFindByUid(uid);
     telnetWrite("Welcome, ", t);
-    telnetWrite(user, t);
+    telnetWrite(u ? u->name : "user", t);
     telnetWrite(".\r\nType 'help' for commands.\r\n", t);
+
+    // ---------- 7. Основной цикл ----------
+    CliContext ctx;
+    ctx.consoleId = consoleId;
+    ctx.write     = telnetWrite;
+    ctx.read      = telnetRead;
+    ctx.user      = t;
+
     osCliPrompt(&ctx);
 
-    // char line[OS_CLI_LINE_MAX];
-    // while (t->client.connected()) {
-    //     int n = telnetRead(line, sizeof(line), t);
-    //     if (n > 0) {
-    //         telnetWrite("\r\n", t);
-    //         osCliExecute(&ctx, line);
-    //     }
-    //     vTaskDelay(pdMS_TO_TICKS(10));
-    // }
-    
-    // Уведомления
     char line[OS_CLI_LINE_MAX];
-    char notice[OS_NOTICE_MAX_LEN];
-    uint32_t noticeEpoch = 0;
+    char outmsg[OS_CONSOLE_MSG_MAX];
+    // uint32_t noticeEpoch = 0;
 
     while (t->client.connected()) {
-        // Проверяем новые уведомления
-        if (osNotifyPoll(&noticeEpoch, notice, sizeof(notice))) {
-            telnetWrite("\r\n\r\n*** SYSTEM NOTICE ***\r\n", t);
-            telnetWrite(notice, t);
-            telnetWrite("\r\n\r\n", t);
+        // --- 7.1. Проверяем очередь исходящих сообщений ---
+        while (xQueueReceive(outq, outmsg, 0) == pdTRUE) {
+            telnetWrite("\r\n[out] ", t);
+            telnetWrite(outmsg, t);
+            telnetWrite("\r\n", t);
             osCliPrompt(&ctx);
         }
 
+        // --- 7.2. Проверяем системные уведомления ---
+        // (если реализован osNotifyPoll)
+        // if (osNotifyPoll(&noticeEpoch, outmsg, sizeof(outmsg))) {
+        //     telnetWrite("\r\n\r\n*** SYSTEM NOTICE ***\r\n", t);
+        //     telnetWrite(outmsg, t);
+        //     telnetWrite("\r\n\r\n", t);
+        //     osCliPrompt(&ctx);
+        // }
+
+        // --- 7.3. Читаем ввод пользователя ---
         int n = telnetRead(line, sizeof(line), t);
         if (n > 0) {
             telnetWrite("\r\n", t);
             osCliExecute(&ctx, line);
         }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+cleanup:
+    // ---------- 8. Освобождаем консоль ----------
+    // Помечаем консоль как свободную
+    {
+        OsConsole* c = osConsoleFind(consoleId);
+        if (c) {
+            // Отменяем регистрацию (нужна функция osConsoleUnregister,
+            // либо делаем это здесь вручную — см. ниже)
+        }
+    }
+
+    // Освобождаем консоль
+    osConsoleUnregister(consoleId);
+
+    // Удаляем очередь
+    if (outq) vQueueDelete(outq);
+
+    // Прощаемся и закрываем сокет
     telnetWrite("\r\nGoodbye.\r\n", t);
     t->client.stop();
+
+    // Освобождаем контекст
     delete t;
+
+    // Завершаем задачу
     vTaskDelete(nullptr);
 }
 
@@ -314,7 +396,13 @@ void osTmpHandleTelnetClient(WiFiClient& client)
     snprintf(name, sizeof(name), "tmp-tel%u", t->consoleId);
 
     ProcessDescriptor* p = osProcessCreate(
-        name, telnetTmpTask, 16384, OS_PRIO_NORMAL, OS_CORE_NET, t);
+        name,
+        telnetTmpTask,
+        16384,                  // стек 16 КБ (для telnet-сессий нужен запас)
+        OS_PRIO_NORMAL,
+        OS_CORE_NET,
+        t
+    );
 
     if (!p) {
         t->client.print("Server busy.\r\n");
@@ -322,6 +410,6 @@ void osTmpHandleTelnetClient(WiFiClient& client)
         delete t;
         return;
     }
-    p->consoleId = t->consoleId;
-    // userNumber будет установлен в telnetTmpTask после аутентификации
+
+    // consoleId установится внутри telnetTmpTask через osConsoleRegister
 }

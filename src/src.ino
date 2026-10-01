@@ -8,6 +8,7 @@
 #include "os_cli.h"
 #include "os_tmp.h"
 #include "os_user.h"
+#include "os_console.h"
 
 // ---------- Демо-задачи ----------
 static void heartbeatTask(void*)
@@ -68,6 +69,16 @@ static void messageIntervalDemo(void*)
     
 }
 
+static void helloTask(void*)
+{
+    for(;;)
+    {
+        osConsoleWriteCurrent("hello world from TMP queue\r\n");
+        // osConsoleWrite(1, "hello world from TMP queue\r\n");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
 // ---------- Setup ----------
 void setup()
 {
@@ -81,6 +92,7 @@ void setup()
     if (!osTimeInit())   { osPrintf("time init failed\r\n");   return; }
     if (!osIpcInit())    { osPrintf("ipc init failed\r\n");    return; }
     if (!osUserInit())   { osPrintf("user init failed\r\n");   return; }
+    if (!osConsoleInit()){ osPrintf("console init failed\r\n");return; }
 
     osFsInit();
     osNetInit("RT-GPON-6089", "u7PxRkFQ");
@@ -91,8 +103,9 @@ void setup()
     osCliInit();
     osTmpInitSerial();
 
-    osProcessCreate("heartbeat", heartbeatTask, 3072, OS_PRIO_LOW,    OS_CORE_NET);
+    osProcessCreate("heartbeat", heartbeatTask,  3072, OS_PRIO_LOW,    OS_CORE_NET);
     osProcessCreate("waiter",    flagWaiterTask, 3072, OS_PRIO_NORMAL, OS_CORE_APP);
+    osProcessCreate("hello",     helloTask,      3072, OS_PRIO_NORMAL, OS_CORE_APP);
 
     osQueueCreate("demo", 8, sizeof(OsMessage));
     // osProcessCreate("producer",  producerTask, 3072, OS_PRIO_NORMAL, OS_CORE_APP);

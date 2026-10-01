@@ -15,6 +15,9 @@
 #define OS_CLI_LINE_MAX        128
 #define OS_MSG_PAYLOAD_MAX     64
 
+#define OS_MAX_CONSOLE        4
+#define OS_CONSOLE_MSG_MAX    128
+
 // ---------- Приоритеты (MP/M-стиль: 0..255) ----------
 #define OS_PRIO_IDLE           0
 #define OS_PRIO_LOW            64
