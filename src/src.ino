@@ -63,6 +63,11 @@ static void consumerTask(void*)
     }
 }
 
+static void messageIntervalDemo(void*)
+{
+    
+}
+
 // ---------- Setup ----------
 void setup()
 {
@@ -78,8 +83,9 @@ void setup()
     if (!osUserInit())   { osPrintf("user init failed\r\n");   return; }
 
     osFsInit();
-    // osNetInit("RT-GPON-6089", "u7PxRkFQ");
-    osNetInit("Allowed-IoT", "Mup80673");
+    osNetInit("RT-GPON-6089", "u7PxRkFQ");
+    // osNetInit("Allowed-IoT", "Mup80673");
+    // osNetInit("TOP3", "top31236");
     !!osNetStartTelnet(23);
 
     osCliInit();
