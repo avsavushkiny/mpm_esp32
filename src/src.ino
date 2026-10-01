@@ -79,6 +79,29 @@ static void helloTask(void*)
     }
 }
 
+static void sendHelloTask(void*)
+{
+    ProcessDescriptor* self = osProcessCurrent();
+
+    for (;;) {
+        // --- Проверяем входящие сообщения ---
+        if (self && self->inq) {
+            char msg[OS_CONSOLE_MSG_MAX];
+            if (xQueueReceive(self->inq, msg, 0) == pdTRUE) {
+                // Получили сообщение от CLI
+                // Можем вывести в консоль задачи или обработать
+                uint16_t cid = self->consoleId;
+                if (cid != 0) {
+                    osConsolePrintf(cid, "[hello] got message: %s\r\n", msg);
+                }
+            }
+        }
+
+        // --- Обычная работа ---
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
 // ---------- Setup ----------
 void setup()
 {
@@ -106,6 +129,7 @@ void setup()
     osProcessCreate("heartbeat", heartbeatTask,  3072, OS_PRIO_LOW,    OS_CORE_NET);
     osProcessCreate("waiter",    flagWaiterTask, 3072, OS_PRIO_NORMAL, OS_CORE_APP);
     osProcessCreate("hello",     helloTask,      3072, OS_PRIO_NORMAL, OS_CORE_APP);
+    osProcessCreate("send_hello",sendHelloTask,  3072, OS_PRIO_NORMAL, OS_CORE_APP);
 
     osQueueCreate("demo", 8, sizeof(OsMessage));
     // osProcessCreate("producer",  producerTask, 3072, OS_PRIO_NORMAL, OS_CORE_APP);

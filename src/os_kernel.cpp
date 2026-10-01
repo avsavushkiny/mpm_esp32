@@ -106,6 +106,8 @@ static void taskTrampoline(void* arg)
         xSemaphoreGive(g_procMutex);
     }
 
+    if (proc->inq) { vQueueDelete(proc->inq); proc->inq = nullptr; }
+
     vTaskDelete(nullptr);
 }
 
@@ -132,6 +134,14 @@ ProcessDescriptor* osProcessCreate(
     proc->wakeTime    = 0;
     proc->flags       = xEventGroupCreate();
     if (!proc->flags) { proc->pid = 0; return nullptr; }
+
+    proc->inq = xQueueCreate(4, OS_CONSOLE_MSG_MAX);
+    if (!proc->inq)
+    {
+        vEventGroupDelete(proc->flags);
+        proc->pid = 0;
+        return nullptr;
+    }
 
     ProcessDescriptor* parent = osProcessCurrent();
     if (parent) {
@@ -224,6 +234,8 @@ bool osProcessKill(uint16_t pid)
     if (proc->flags) { vEventGroupDelete(proc->flags); proc->flags = nullptr; }
 
     xSemaphoreGive(g_procMutex);
+
+    if (proc->inq) { vQueueDelete(proc->inq); proc->inq = nullptr; }
 
     vTaskDelete(t);
     return true;
@@ -351,4 +363,29 @@ bool osNotifyPoll(uint32_t* localEpoch, char* out, size_t maxLen)
         return true;
     }
     return false;
+}
+
+bool osProcessSendMessage(uint16_t pid, const char* msg)
+{
+    if (!msg || !*msg) return false;
+
+    if (xSemaphoreTake(g_procMutex, portMAX_DELAY) != pdTRUE) return false;
+
+    ProcessDescriptor* proc = nullptr;
+    for (auto& p : g_procTable) if (p.pid == pid) { proc = &p; break; }
+
+    if (!proc || !proc->inq) {
+        xSemaphoreGive(g_procMutex);
+        return false;
+    }
+
+    QueueHandle_t q = proc->inq;
+    xSemaphoreGive(g_procMutex);
+
+    // Копируем в буфер
+    char buf[OS_CONSOLE_MSG_MAX];
+    strncpy(buf, msg, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    return xQueueSend(q, buf, pdMS_TO_TICKS(100)) == pdTRUE;
 }

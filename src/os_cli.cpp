@@ -4,6 +4,7 @@
 #include "os_fs.h"
 #include "os_net.h"
 #include "os_user.h"
+#include "os_console.h"
 #include <stdarg.h>
 
 static void cmdHelp(CliContext*, int, char**);
@@ -27,9 +28,9 @@ static void cmdSu(CliContext*, int, char**);
 static void cmdUsers(CliContext*, int, char**);
 static void cmdUseradd(CliContext*, int, char**);
 static void cmdUserdel(CliContext*, int, char**);
-
 static void cmdPrivs(CliContext*, int, char**);
 static void cmdReboot(CliContext*, int, char**);
+static void cmdSend(CliContext*, int, char**);
 
 static const ShellCommand g_commands[] = {
     {"help",     cmdHelp,     "Show this help"},
@@ -52,6 +53,7 @@ static const ShellCommand g_commands[] = {
     {"users",    cmdUsers,    "users        - list users"},
     {"useradd",  cmdUseradd,  "useradd <name> <pass> <privs>"},
     {"userdel",  cmdUserdel,  "userdel <name>"},
+    {"send",     cmdSend,     "send <pid|console> <text> - send message to task or console"},
 
     {"privs",    cmdPrivs,    "privs        - show privilege table (root only)"},
     {"reboot",   cmdReboot,   "reboot [now] - restart the system"},
@@ -502,4 +504,51 @@ static void cmdReboot(CliContext* ctx, int argc, char** argv)
     );
 
     ESP.restart();
+}
+
+static void cmdSend(CliContext* ctx, int argc, char** argv)
+{
+    if (argc < 3) {
+        cliWrite(ctx, "usage: send <pid|console> <text>\r\n");
+        cliWrite(ctx, "       pid >= 100, console 1..4\r\n");
+        return;
+    }
+
+    int target = atoi(argv[1]);
+    if (target <= 0) {
+        cliWrite(ctx, "invalid target\r\n");
+        return;
+    }
+
+    // Собираем остальные аргументы в одну строку
+    char buf[OS_CONSOLE_MSG_MAX];
+    int off = 0;
+    for (int i = 2; i < argc && off < (int)sizeof(buf) - 2; i++) {
+        int w = snprintf(buf + off, sizeof(buf) - off, "%s%s",
+                         argv[i], (i < argc - 1) ? " " : "");
+        if (w < 0) break;
+        off += w;
+    }
+
+    // Решаем: это PID или consoleId?
+    // PID начинаются с 100, consoleId 1..OS_MAX_CONSOLE
+    if (target < 100) {
+        // --- Отправка в консоль (очередь TMP) ---
+        uint16_t consoleId = (uint16_t)target;
+
+        if (osConsoleWrite(consoleId, buf)) {
+            cliPrintf(ctx, "sent to console %u\r\n", consoleId);
+        } else {
+            cliPrintf(ctx, "console %u not found or queue full\r\n", consoleId);
+        }
+    } else {
+        // --- Отправка задаче (по PID) ---
+        uint16_t pid = (uint16_t)target;
+
+        if (osProcessSendMessage(pid, buf)) {
+            cliPrintf(ctx, "sent to pid %u\r\n", pid);
+        } else {
+            cliPrintf(ctx, "pid %u not found or queue full\r\n", pid);
+        }
+    }
 }

@@ -15,6 +15,7 @@ struct ProcessDescriptor {
     uint32_t            startTime;
     uint32_t            cpuTimeUs;
     uint32_t            wakeTime;
+    QueueHandle_t inq;
 };
 
 bool osKernelInit();
@@ -50,3 +51,7 @@ void osNotifyAllAndWait(const char* message, uint32_t waitMs);  // и подож
 void osNotifyAll(const char* message);
 void osNotifyAllAndWait(const char* message, uint32_t waitMs);
 bool osNotifyPoll(uint32_t* localEpoch, char* out, size_t maxLen);
+
+// Отправить сообщение задаче по PID
+// Возвращает true при успехе
+bool osProcessSendMessage(uint16_t pid, const char* msg);
