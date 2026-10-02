@@ -103,7 +103,7 @@ static void serialTmpTask(void*)
 bool osTmpInitSerial()
 {
     ProcessDescriptor* p = osProcessCreate(
-        "tmp-serial", serialTmpTask, 12288, OS_PRIO_NORMAL, OS_CORE_APP);
+        "tmp-serial", serialTmpTask, 12288, OS_PRIO_NORMAL, OS_CORE_APP); // 12288
     if (p) {
         p->consoleId  = 1;
         p->userNumber = OS_UID_ROOT;   // root по умолчанию

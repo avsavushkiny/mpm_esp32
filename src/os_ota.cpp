@@ -1,5 +1,6 @@
 #include "os_ota.h"
 #include "os_kernel.h"
+#include "os_console.h"
 #include <Update.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -94,4 +95,61 @@ bool osOtaUpdateFromUrl(const char* url, char* outErr, size_t errMax)
     vTaskDelay(pdMS_TO_TICKS(500));
     ESP.restart();
     return true;   // сюда не дойдём
+}
+
+// ---------- Контекст для задачи ----------
+struct OtaCtx {
+    char      url[OS_OTA_URL_MAX];
+    uint16_t  consoleId;
+};
+
+// ---------- Задача OTA ----------
+static void otaTask(void* arg)
+{
+    OtaCtx* ctx = static_cast<OtaCtx*>(arg);
+    if (!ctx) { vTaskDelete(nullptr); return; }
+
+    char err[64] = {0};
+    bool ok = osOtaUpdateFromUrl(ctx->url, err, sizeof(err));
+
+    if (!ok) {
+        osPrintf("[OTA] failed: %s\r\n", err);
+        if (ctx->consoleId != 0) {
+            osConsolePrintf(ctx->consoleId,
+                            "\r\n[OTA] failed: %s\r\n", err);
+        }
+    }
+    // При успехе osOtaUpdateFromUrl вызовет ESP.restart() — сюда не дойдём
+
+    delete ctx;
+    vTaskDelete(nullptr);
+}
+
+// ---------- Публичный API для CLI ----------
+bool osOtaStartFromUrl(const char* url, uint16_t consoleId)
+{
+    if (!url || !*url) return false;
+
+    OtaCtx* ctx = new OtaCtx{};
+    if (!ctx) return false;
+
+    strncpy(ctx->url, url, sizeof(ctx->url) - 1);
+    ctx->url[sizeof(ctx->url) - 1] = '\0';
+    ctx->consoleId = consoleId;
+
+    BaseType_t rc = xTaskCreatePinnedToCore(
+        otaTask,
+        "ota_task",
+        32768,             // 32 КБ — с запасом для HTTPS+TLS
+        ctx,
+        2,                 // приоритет
+        nullptr,           // handle не нужен
+        OS_CORE_NET        // CORE 0, рядом с WiFi
+    );
+
+    if (rc != pdPASS) {
+        delete ctx;
+        return false;
+    }
+    return true;
 }

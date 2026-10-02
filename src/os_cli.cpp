@@ -592,12 +592,10 @@ static void cmdOtaUrl(CliContext* ctx, int argc, char** argv)
         return;
     }
 
-    cliPrintf(ctx, "starting OTA from %s\r\n", argv[1]);
-    cliWrite(ctx, "system may reboot automatically...\r\n");
-
-    char err[64] = {0};
-    if (!osOtaUpdateFromUrl(argv[1], err, sizeof(err))) {
-        cliPrintf(ctx, "OTA failed: %s\r\n", err);
+    if (osOtaStartFromUrl(argv[1], ctx->consoleId)) {
+        cliPrintf(ctx, "OTA started in background (url=%s)\r\n", argv[1]);
+        cliWrite(ctx, "watch progress in this console...\r\n");
+    } else {
+        cliWrite(ctx, "failed to start OTA task\r\n");
     }
-    // При успехе сюда не дойдём — ESP.restart() уже вызван
 }
