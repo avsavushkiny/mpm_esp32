@@ -15,6 +15,8 @@ static void serialWrite(const char* s, void*)
 
 static int serialRead(char* buf, size_t max, void*)
 {
+    if (!buf || max == 0) return 0;
+
     size_t n = 0;
     uint32_t start = millis();
     while (n < max - 1) {
@@ -44,9 +46,20 @@ static void serialTmpTask(void*)
 {
     // 1) Создаём очередь для исходящих сообщений
     QueueHandle_t outq = xQueueCreate(8, OS_CONSOLE_MSG_MAX);
+    if (!outq) {
+        OS_LOG("Cannot create serial console queue");
+        vTaskDelete(nullptr);
+        return;
+    }
 
     // 2) Регистрируем консоль
     uint16_t consoleId = osConsoleRegister(outq, nullptr);
+    if (consoleId == 0) {
+        OS_LOG("Cannot register serial console");
+        vQueueDelete(outq);
+        vTaskDelete(nullptr);
+        return;
+    }
     // consoleId будет 1 для первой консоли
 
     // 3) Устанавливаем в свой дескриптор
@@ -105,7 +118,6 @@ bool osTmpInitSerial()
     ProcessDescriptor* p = osProcessCreate(
         "tmp-serial", serialTmpTask, 12288, OS_PRIO_NORMAL, OS_CORE_APP); // 12288
     if (p) {
-        p->consoleId  = 1;
         p->userNumber = OS_UID_ROOT;   // root по умолчанию
     }
     return p != nullptr;
@@ -133,7 +145,7 @@ static void telnetWrite(const char* s, void* user)
 static int telnetRead(char* buf, size_t max, void* user)
 {
     TelnetCtx* t = static_cast<TelnetCtx*>(user);
-    if (!t || !t->client.connected()) return 0;
+    if (!t || !buf || max == 0 || !t->client.connected()) return 0;
 
     size_t n = 0;
     uint32_t lastByteTime = millis();
@@ -200,6 +212,8 @@ static int telnetRead(char* buf, size_t max, void* user)
 // Возвращает: длину строки, -1 при разрыве, -2 при таймауте
 static int telnetReadNoEcho(TelnetCtx* t, char* buf, size_t max, uint32_t timeoutMs)
 {
+    if (!t || !buf || max == 0) return -1;
+
     size_t n = 0;
     uint32_t start = millis();
 
@@ -279,13 +293,13 @@ static void telnetTmpTask(void* arg)
 
     for (int attempt = 0; attempt < 3; attempt++) {
         telnetWrite("login: ", t);
-        int n = telnetReadNoEcho(t, user, sizeof(user), 3600000);  // 60 сек
+        int n = telnetReadNoEcho(t, user, sizeof(user), 60000);
         if (n == -1) { telnetWrite("\r\nDisconnected.\r\n", t); goto cleanup; }
         if (n == -2) { telnetWrite("\r\nTimeout.\r\n", t);      goto cleanup; }
         if (n == 0)  { telnetWrite("\r\n", t); continue; }
 
         telnetWrite("Password: ", t);
-        n = telnetReadNoEcho(t, pass, sizeof(pass), 3600000);
+        n = telnetReadNoEcho(t, pass, sizeof(pass), 60000);
         if (n == -1) { telnetWrite("\r\nDisconnected.\r\n", t); goto cleanup; }
         if (n == -2) { telnetWrite("\r\nTimeout.\r\n", t);      goto cleanup; }
         telnetWrite("\r\n", t);
@@ -300,6 +314,8 @@ static void telnetTmpTask(void* arg)
         goto cleanup;
     }
 
+    u = osUserFindByUid(uid);
+
     // ---------- 5. Устанавливаем uid и consoleId в дескриптор ----------
     {
         ProcessDescriptor* self = osProcessCurrent();
@@ -310,7 +326,6 @@ static void telnetTmpTask(void* arg)
     }
 
     // ---------- 6. Приветствие после логина ----------
-    // const OsUser* u = osUserFindByUid(uid);
     telnetWrite("Welcome, ", t);
     telnetWrite(u ? u->name : "user", t);
     telnetWrite(".\r\nType 'help' for commands.\r\n", t);
@@ -358,17 +373,7 @@ static void telnetTmpTask(void* arg)
 
 cleanup:
     // ---------- 8. Освобождаем консоль ----------
-    // Помечаем консоль как свободную
-    {
-        OsConsole* c = osConsoleFind(consoleId);
-        if (c) {
-            // Отменяем регистрацию (нужна функция osConsoleUnregister,
-            // либо делаем это здесь вручную — см. ниже)
-        }
-    }
-
-    // Освобождаем консоль
-    osConsoleUnregister(consoleId);
+    if (consoleId != 0) osConsoleUnregister(consoleId);
 
     // Удаляем очередь
     if (outq) vQueueDelete(outq);
@@ -384,16 +389,27 @@ cleanup:
     vTaskDelete(nullptr);
 }
 
-// Счётчик консолей для telnet-сессий
-static uint16_t g_nextConsole = 2;
+// Счётчик имён задач telnet-сессий. ID консоли выдаёт osConsoleRegister().
+static uint16_t g_nextTelnetSession = 1;
+static portMUX_TYPE g_telnetSessionMux = portMUX_INITIALIZER_UNLOCKED;
 
 void osTmpHandleTelnetClient(WiFiClient& client)
 {
-    TelnetCtx* t = new TelnetCtx{client, g_nextConsole++};
-    if (g_nextConsole > 100) g_nextConsole = 2;
+    uint16_t sessionId;
+    portENTER_CRITICAL(&g_telnetSessionMux);
+    sessionId = g_nextTelnetSession++;
+    if (g_nextTelnetSession == 0) g_nextTelnetSession = 1;
+    portEXIT_CRITICAL(&g_telnetSessionMux);
+
+    TelnetCtx* t = new TelnetCtx{client, 0};
+    if (!t) {
+        client.print("Server busy.\r\n");
+        client.stop();
+        return;
+    }
 
     char name[OS_MAX_NAME_LEN];
-    snprintf(name, sizeof(name), "tmp-tel%u", t->consoleId);
+    snprintf(name, sizeof(name), "tmp-tel%u", static_cast<unsigned>(sessionId));
 
     ProcessDescriptor* p = osProcessCreate(
         name,
