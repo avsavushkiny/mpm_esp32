@@ -9,9 +9,13 @@
 #include <HTTPClient.h>
 
 //  Глобальное состояние OTA-сессии
-static uint16_t g_otaConsoleId = 0;   // консоль, откуда вызван otaurl (0 = нет)
+static uint16_t        g_otaConsoleId = 0;      // консоль-источник (0 = нет)
+static volatile bool   g_otaRunning   = false;  // OTA уже идёт?
+static volatile bool   g_otaCancel    = false;  // запрос на отмену
 
-//  Хелпер: пишет и в Serial (UART0), и в консоль-источник
+// ============================================================
+//  Хелпер: пишет и в Serial, и в консоль-источник (без дублей)
+// ============================================================
 static void otaLog(const char* fmt, ...)
 {
     char buf[192];
@@ -25,13 +29,37 @@ static void otaLog(const char* fmt, ...)
     if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
 
     if (g_otaConsoleId != 0) {
-        // Пишем через консоль-источник.
-        // Serial (консоль 1) уже сам отправит в UART через TMP-очередь.
+        // Консоль-источник известна — пишем через TMP-очередь.
+        // Serial (консоль 1) сам отправит в UART.
         osConsoleWrite(g_otaConsoleId, buf);
     } else {
-        // Консоль неизвестна (вызов из setup) — пишем напрямую в UART.
+        // Консоль неизвестна — пишем напрямую в UART.
         uart_write_bytes(UART_NUM_0, buf, n);
     }
+}
+
+//  Прогресс-бар
+static void otaProgress(int percent)
+{
+    char bar[24];
+    int filled = percent * 20 / 100;
+    if (filled > 20) filled = 20;
+
+    for (int i = 0; i < 20; i++) bar[i] = (i < filled) ? '#' : '-';
+    bar[20] = '\0';
+
+    otaLog("[OTA] [%s] %3d%%\r\n", bar, percent);
+}
+
+//  Публичный API: запрос отмены (вызывается из CLI)
+void osOtaCancel()
+{
+    if (g_otaRunning) g_otaCancel = true;
+}
+
+bool osOtaIsRunning()
+{
+    return g_otaRunning;
 }
 
 //  Синхронное обновление по URL (вызывается из otaTask)
@@ -54,7 +82,7 @@ bool osOtaUpdateFromUrl(const char* url, char* outErr, size_t errMax)
         return false;
     }
 
-    // Следовать редиректам (GitHub отдаёт 302 на raw.githubusercontent.com)
+    // GitHub отдаёт 302 на raw.githubusercontent.com
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setTimeout(20000);
     http.setUserAgent("ESP32-OTA/1.0");
@@ -79,7 +107,8 @@ bool osOtaUpdateFromUrl(const char* url, char* outErr, size_t errMax)
     uint32_t freeSpace = ESP.getFreeSketchSpace();
     if ((uint32_t)len > freeSpace) {
         if (outErr) snprintf(outErr, errMax,
-                             "too large: %d > %lu", len, (unsigned long)freeSpace);
+                             "too large: %d > %lu",
+                             len, (unsigned long)freeSpace);
         http.end();
         return false;
     }
@@ -92,12 +121,21 @@ bool osOtaUpdateFromUrl(const char* url, char* outErr, size_t errMax)
 
     WiFiClient* stream = http.getStreamPtr();
     uint8_t  buf[1024];
-    int      written = 0;
-    uint32_t lastProgress = 0;
-    uint32_t lastDataTime = millis();
+    int      written       = 0;
+    uint32_t lastProgress  = 0;
+    uint32_t lastDataTime  = millis();
+    int      lastPct       = -1;
 
     while (written < len) {
-        // Проверка обрыва соединения
+        // --- Отмена ---
+        if (g_otaCancel) {
+            if (outErr) snprintf(outErr, errMax, "cancelled at %d / %d", written, len);
+            Update.end(false);
+            http.end();
+            return false;
+        }
+
+        // --- Обрыв соединения ---
         if (!http.connected() && !stream->available()) {
             if (outErr) snprintf(outErr, errMax,
                                  "disconnected at %d / %d", written, len);
@@ -133,12 +171,15 @@ bool osOtaUpdateFromUrl(const char* url, char* outErr, size_t errMax)
         written      += n;
         lastDataTime  = millis();
 
-        // Прогресс раз в OS_OTA_PROGRESS_MS
+        // Прогресс раз в OS_OTA_PROGRESS_MS, но не чаще 1% изменения
         uint32_t now = millis();
         if (now - lastProgress > OS_OTA_PROGRESS_MS) {
             lastProgress = now;
             int pct = (int)((written * 100ULL) / len);
-            otaLog("[OTA] %d%% (%d / %d)\r\n", pct, written, len);
+            if (pct != lastPct) {
+                lastPct = pct;
+                otaProgress(pct);
+            }
         }
     }
 
@@ -157,8 +198,8 @@ bool osOtaUpdateFromUrl(const char* url, char* outErr, size_t errMax)
         return false;
     }
 
-    otaLog("[OTA] success, rebooting...\r\n");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    otaLog("[OTA] success, rebooting in 1 second...\r\n");
+    vTaskDelay(pdMS_TO_TICKS(1000));   // дать UART/TMP отправить
     ESP.restart();
     return true;   // сюда не дойдём
 }
@@ -170,16 +211,17 @@ struct OtaCtx {
 };
 
 //  Задача OTA — работает в фоне, CLI свободен
+//  НЕ вызывает vTaskDelete — это делает taskTrampoline
 static void otaTask(void* arg)
 {
     OtaCtx* ctx = static_cast<OtaCtx*>(arg);
     if (!ctx) {
-        vTaskDelete(nullptr);
+        g_otaRunning = false;
         return;
     }
 
-    // Запоминаем консоль-источник для otaLog()
     g_otaConsoleId = ctx->consoleId;
+    g_otaCancel    = false;
 
     char err[64] = {0};
     bool ok = osOtaUpdateFromUrl(ctx->url, err, sizeof(err));
@@ -187,18 +229,26 @@ static void otaTask(void* arg)
     if (!ok) {
         otaLog("[OTA] failed: %s\r\n", err);
     }
-    // При успехе osOtaUpdateFromUrl вызовет ESP.restart() — сюда не дойдём
+    // При успехе osOtaUpdateFromUrl вызывает ESP.restart() — сюда не дойдём
 
     g_otaConsoleId = 0;
+    g_otaRunning   = false;
+    g_otaCancel    = false;
 
     delete ctx;
-    vTaskDelete(nullptr);
+    // НЕ вызываем vTaskDelete(nullptr) — это сделает taskTrampoline
 }
 
 //  Публичный API: запустить OTA в фоне
 bool osOtaStartFromUrl(const char* url, uint16_t consoleId)
 {
     if (!url || !*url) return false;
+
+    // Защита от параллельного OTA
+    if (g_otaRunning) {
+        osConsoleWrite(consoleId, "OTA already in progress\r\n");
+        return false;
+    }
 
     OtaCtx* ctx = new OtaCtx{};
     if (!ctx) return false;
@@ -207,20 +257,22 @@ bool osOtaStartFromUrl(const char* url, uint16_t consoleId)
     ctx->url[sizeof(ctx->url) - 1] = '\0';
     ctx->consoleId = consoleId;
 
-    BaseType_t rc = xTaskCreatePinnedToCore(
-        otaTask,
+    g_otaRunning = true;
+    g_otaCancel  = false;
+
+    ProcessDescriptor* p = osProcessCreate(
         "ota_task",
-        32768,          // 32 КБ — с запасом для HTTPS + TLS
-        ctx,
-        2,              // приоритет
-        nullptr,        // handle не нужен
-        OS_CORE_NET     // CORE 0, рядом с WiFi
+        otaTask,
+        32768,                // 32 КБ — с запасом для HTTPS + TLS
+        OS_PRIO_NORMAL,
+        OS_CORE_NET,
+        ctx
     );
 
-    if (rc != pdPASS) {
+    if (!p) {
+        g_otaRunning = false;
         delete ctx;
         return false;
     }
-
     return true;
 }

@@ -160,7 +160,7 @@ ProcessDescriptor* osProcessCreate(
     BaseType_t rc = xTaskCreatePinnedToCore(
         taskTrampoline,
         proc->name,
-        stackBytes / 4,
+        stackBytes, //stackBytes / 4,
         ctx,
         osMapPriority(mpmPriority),
         &proc->task,

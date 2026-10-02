@@ -32,6 +32,7 @@ static void cmdPrivs(CliContext*, int, char**);
 static void cmdReboot(CliContext*, int, char**);
 static void cmdSend(CliContext*, int, char**);
 static void cmdOtaUrl(CliContext*, int, char**);
+static void cmdOtaCancel(CliContext* ctx, int, char**);
 
 static const ShellCommand g_commands[] = {
     {"help",     cmdHelp,     "Show this help"},
@@ -55,9 +56,10 @@ static const ShellCommand g_commands[] = {
     {"useradd",  cmdUseradd,  "useradd <name> <pass> <privs>"},
     {"userdel",  cmdUserdel,  "userdel <name>"},
     {"send",     cmdSend,     "send <pid|console> <text> - send message to task or console"},
-
     {"privs",    cmdPrivs,    "privs        - show privilege table (root only)"},
     {"otaurl",   cmdOtaUrl,   "otaurl <url> - flash firmware from URL"},
+    {"otacancel",cmdOtaCancel, "otacancel         - cancel running OTA"},
+    
     {"reboot",   cmdReboot,   "reboot [now] - restart the system"},
 };
 
@@ -598,4 +600,18 @@ static void cmdOtaUrl(CliContext* ctx, int argc, char** argv)
     } else {
         cliWrite(ctx, "failed to start OTA task\r\n");
     }
+}
+
+static void cmdOtaCancel(CliContext* ctx, int, char**)
+{
+    if (!osUserHasPriv(OS_PRIV_REBOOT)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
+    if (!osOtaIsRunning()) {
+        cliWrite(ctx, "OTA not running\r\n");
+        return;
+    }
+    osOtaCancel();
+    cliWrite(ctx, "OTA cancel requested\r\n");
 }
