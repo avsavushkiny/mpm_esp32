@@ -29,6 +29,10 @@
 #define OS_CORE_NET            0
 #define OS_CORE_APP            1
 
+// ---------- OTA ----------
+#define OS_OTA_URL_MAX        256
+#define OS_OTA_PROGRESS_MS    500
+
 // ---------- Состояния процесса ----------
 enum class ProcState : uint8_t {
     FREE = 0,

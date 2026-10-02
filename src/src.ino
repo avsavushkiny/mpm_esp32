@@ -73,9 +73,9 @@ static void helloTask(void*)
 {
     for(;;)
     {
-        osConsoleWriteCurrent("hello world from TMP queue\r\n");
+        osConsoleWriteCurrent("HELLO world from TMP queue [new]\r\n");
         // osConsoleWrite(1, "hello world from TMP queue\r\n");
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(60000));
     }
 }
 

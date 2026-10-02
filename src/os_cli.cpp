@@ -5,6 +5,7 @@
 #include "os_net.h"
 #include "os_user.h"
 #include "os_console.h"
+#include "os_ota.h"
 #include <stdarg.h>
 
 static void cmdHelp(CliContext*, int, char**);
@@ -19,7 +20,6 @@ static void cmdStat(CliContext*, int, char**);
 static void cmdLs(CliContext*, int, char**);
 static void cmdCat(CliContext*, int, char**);
 static void cmdEcho(CliContext*, int, char**);
-
 static void cmdWho(CliContext*, int, char**);
 static void cmdLogin(CliContext*, int, char**);
 static void cmdLogout(CliContext*, int, char**);
@@ -31,6 +31,7 @@ static void cmdUserdel(CliContext*, int, char**);
 static void cmdPrivs(CliContext*, int, char**);
 static void cmdReboot(CliContext*, int, char**);
 static void cmdSend(CliContext*, int, char**);
+static void cmdOtaUrl(CliContext*, int, char**);
 
 static const ShellCommand g_commands[] = {
     {"help",     cmdHelp,     "Show this help"},
@@ -56,6 +57,7 @@ static const ShellCommand g_commands[] = {
     {"send",     cmdSend,     "send <pid|console> <text> - send message to task or console"},
 
     {"privs",    cmdPrivs,    "privs        - show privilege table (root only)"},
+    {"otaurl",   cmdOtaUrl,   "otaurl <url> - flash firmware from URL"},
     {"reboot",   cmdReboot,   "reboot [now] - restart the system"},
 };
 
@@ -577,4 +579,25 @@ static void cmdSend(CliContext* ctx, int argc, char** argv)
             cliPrintf(ctx, "pid %u not found or queue full\r\n", pid);
         }
     }
+}
+
+static void cmdOtaUrl(CliContext* ctx, int argc, char** argv)
+{
+    if (!osUserHasPriv(OS_PRIV_REBOOT)) {
+        cliWrite(ctx, "Permission denied.\r\n");
+        return;
+    }
+    if (argc < 2) {
+        cliWrite(ctx, "usage: otaurl <url>\r\n");
+        return;
+    }
+
+    cliPrintf(ctx, "starting OTA from %s\r\n", argv[1]);
+    cliWrite(ctx, "system may reboot automatically...\r\n");
+
+    char err[64] = {0};
+    if (!osOtaUpdateFromUrl(argv[1], err, sizeof(err))) {
+        cliPrintf(ctx, "OTA failed: %s\r\n", err);
+    }
+    // При успехе сюда не дойдём — ESP.restart() уже вызван
 }
