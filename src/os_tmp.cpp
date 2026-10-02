@@ -279,13 +279,13 @@ static void telnetTmpTask(void* arg)
 
     for (int attempt = 0; attempt < 3; attempt++) {
         telnetWrite("login: ", t);
-        int n = telnetReadNoEcho(t, user, sizeof(user), 60000);  // 60 сек
+        int n = telnetReadNoEcho(t, user, sizeof(user), 3600000);  // 60 сек
         if (n == -1) { telnetWrite("\r\nDisconnected.\r\n", t); goto cleanup; }
         if (n == -2) { telnetWrite("\r\nTimeout.\r\n", t);      goto cleanup; }
         if (n == 0)  { telnetWrite("\r\n", t); continue; }
 
         telnetWrite("Password: ", t);
-        n = telnetReadNoEcho(t, pass, sizeof(pass), 60000);
+        n = telnetReadNoEcho(t, pass, sizeof(pass), 3600000);
         if (n == -1) { telnetWrite("\r\nDisconnected.\r\n", t); goto cleanup; }
         if (n == -2) { telnetWrite("\r\nTimeout.\r\n", t);      goto cleanup; }
         telnetWrite("\r\n", t);
